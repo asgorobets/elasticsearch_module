@@ -1,5 +1,8 @@
 <?php
 
+/**
+ * Implements hook_init().
+ */
 function elasticsearch_init(){
   $libraries = libraries_get_libraries();
    if (isset($libraries['Elastica'])) {
@@ -10,8 +13,22 @@ function elasticsearch_init(){
      spl_autoload_register('elasticsearch_autoload');
 
      $client = new Elastica_Client();
+     $index = $client->getIndex('test');
   }
 }
+
+/**
+ * Implements hook_search_api_service_info().
+ */
+function elasticsearch_search_api_service_info() {
+  $services['elasticsearch_service'] = array(
+    'name' => t('elasticsearch service'),
+    'description' => t('Index items using elasticsearch.'),
+    'class' => 'ElasticsearchService',
+  );
+  return $services;
+}
+
 
 function elasticsearch_autoload($class) {
   if (substr($class, 0, 9) == 'Elastica_') {

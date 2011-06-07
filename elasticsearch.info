@@ -2,3 +2,5 @@ name = Elastic Search
 description = Integration with the Elastic Search application
 core = 7.x
 dependencies[] = libraries
+
+files[] = service.inc
