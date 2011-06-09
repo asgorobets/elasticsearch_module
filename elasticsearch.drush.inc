@@ -42,3 +42,13 @@ function drush_download_elastica() {
     drush_log(dt('Drush was unable to clone Elastica to @path.', array('@path' => $path)), 'error');
   }
 }
+
+/**
+* Implements drush_MODULE_post_COMMAND().
+ */
+function drush_elasticsearch_post_pm_enable() {
+  $modules = func_get_args();
+  if (in_array('elasticsearch', $modules)) {
+    drush_download_elastica();
+  }
+}
