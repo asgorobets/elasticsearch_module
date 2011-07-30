@@ -1,0 +1,17 @@
+<?php
+
+/**
+ * @file
+ * Installation-related functions.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function elasticsearch_field_storage_install() {
+  // When running inside the testing framework, set a default random prefix.
+  if (isset($GLOBALS['drupal_test_info'])) {
+    variable_set('elasticsearch_field_storage_prefix', substr(sha1(mt_rand()), 0, 7));
+    elasticsearch_field_storage_create_indexes();
+  }
+}

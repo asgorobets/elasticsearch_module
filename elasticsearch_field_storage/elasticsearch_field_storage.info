@@ -1,0 +1,6 @@
+name = Elastic Search Field Storage
+description = Field storage for Elastic Search.
+core = 7.x
+dependencies[] = elasticsearch
+
+files[] = tests/elasticsearch_field_storage.test

@@ -1,0 +1,19 @@
+<?php
+
+/**
+ * Execute all the Field storage unit test with elasticsearch-based field storage.
+ */
+class ElasticSearchFieldAttachStorageTestCase extends FieldAttachStorageTestCase {
+  public static function getInfo() {
+    return array(
+      'name' => 'Field attach tests (elasticsearch)',
+      'description' => 'Test storage-related Field Attach API functions.',
+      'group' => 'elasticsearch',
+    );
+  }
+
+  function setUp() {
+    $this->default_storage = 'elasticsearch_field_storage';
+    parent::setUp('elasticsearch', 'elasticsearch_field_storage');
+  }
+}
