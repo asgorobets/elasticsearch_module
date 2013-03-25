@@ -1,5 +1,8 @@
 <?php
 
+use Elastica\Client;
+use Elastica\Document;
+
 /**
  * Search service class using elasticsearch server.
  */
@@ -45,7 +48,7 @@ class ElasticsearchService extends SearchApiAbstractService {
 
   public function deleteItems($ids = 'all', SearchApiIndex $index = NULL) {
     if ($ids == 'all' && $index) {
-      $client = new Elastica_Client();
+      $client = new Client();
       $index = $client->getIndex($index->machine_name);
       $index->delete();
     }
@@ -62,7 +65,7 @@ class ElasticsearchService extends SearchApiAbstractService {
       foreach ($item as $key => $field) {
         $doc_fields[$key] = $field['value'];
       }
-      $doc = new Elastica_Document($id, $doc_fields);
+      $doc = new Document($id, $doc_fields);
 
       try {
         $type->addDocument($doc);
@@ -123,7 +126,7 @@ class ElasticsearchService extends SearchApiAbstractService {
   }
 
   public function getIndexType($index) {
-    $client = new Elastica_Client();
+    $client = new Client();
     $index = $client->getIndex($index->machine_name);
     return $index->getType('entity');
   }

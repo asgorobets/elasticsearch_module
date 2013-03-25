@@ -1,5 +1,7 @@
 <?php
 
+use Elastica\Client;
+
 /**
  * Implements hook_init().
  */
@@ -12,7 +14,7 @@ function elasticsearch_init(){
 
      spl_autoload_register('elasticsearch_autoload');
 
-     $client = new Elastica_Client();
+     $client = new Client();
      $index = $client->getIndex('test');
   }
 }
@@ -31,8 +33,8 @@ function elasticsearch_search_api_service_info() {
 
 
 function elasticsearch_autoload($class) {
-  if (substr($class, 0, 9) == 'Elastica_') {
-    $file = str_replace('_', '/', $class) . '.php';
+  if (substr($class, 0, 8) == 'Elastica') {
+    $file = str_replace('\\', '/', $class) . '.php';
     require_once $file;
   }
 }
