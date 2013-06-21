@@ -4,7 +4,11 @@
  * @file
  * Implementation of the field storage API for Elasticsearch.
  */
-
+use Elastica\Client;
+use Elastica\Document;
+use Elastica\Query\Ids;
+use Elastica\Query\Terms;
+use Elastica\Exception\ResponseException;
 /**
  * Implement hook_field_storage_info().
  */
@@ -18,11 +22,11 @@ function elasticsearch_field_storage_field_storage_info() {
 }
 
 function elasticsearch_field_storage_index($age) {
-  if (!class_exists('Elastica_Client')) {
+  if (!class_exists('Client')) {
     elasticsearch_init();
   }
-  $client = new Elastica_Client();
-  return $client->getIndex(variable_get('elasticsearch_field_storage_prefix') . ($age == FIELD_LOAD_CURRENT ? '_field_current' : '_field_revision'));
+  $client = new Client();
+  return $client->getIndex(variable_get('elasticsearch_field_storage_prefix') . ($age == FIELD_LOAD_CURRENT ? 'field_current' : 'field_revision'));
 }
 
 function elasticsearch_field_storage_create_indexes() {
@@ -35,7 +39,7 @@ function elasticsearch_field_storage_create_indexes() {
     try {
       $index->getStatus();
     }
-    catch (Elastica_Exception_Response $e) {
+    catch (ResponseException $e) {
       // Try to create the index.
       $index->create();
     }
@@ -46,13 +50,12 @@ function elasticsearch_field_storage_create_indexes() {
       $type = $index->getType($entity_type);
 
     	$mapping = array(
-    	  // Base information.
-    		'_id' => array('type' => 'long', 'store' => 'yes'),
-      	'_revision_id' => array('type' => 'long', 'store' => 'yes'),
-
+        // Base information.
+        'id' => array('type' => 'long', 'store' => 'yes'),
+        'revision_id' => array('type' => 'long', 'store' => 'yes'),
         // Basic entity parameters.
-    		'_entity_type' => array('type' => 'string', 'store' => 'yes'),
-    		'_entity_bundle' => array('type' => 'string', 'store' => 'yes'),
+        'entity_type' => array('type' => 'string', 'store' => 'yes'),
+        'entity_bundle' => array('type' => 'string', 'store' => 'yes'),
       );
 
       // Add fields.
@@ -119,28 +122,28 @@ function elasticsearch_field_storage_field_storage_load($entity_type, $entities,
 
   // Execute the query and save the fields to the parent object.
   $type = elasticsearch_field_storage_index($age)->getType($entity_type);
-  $query = new Elastica_Query_Ids();
+  $query = new Ids();
   $query->setType($entity_type);
 	$query->setIds(array_keys($keys));
 	$result = $type->search($query);
 
   foreach ($result as $document) {
     $row = $document->getSource();
-    $entity_id = $row['_entity_id'];
+    $entity_id = $row['entity_id'];
     foreach ($saved_fields as $field_id => $field) {
       $field_name = $field['field_name'];
       $field_values = array();
       if (!empty($row[$field_name])) {
         // Restore the field structure.
         if ($field['cardinality'] == 1) {
-          $language = isset($row[$field_name]['_language']) ? $row[$field_name]['_language'] : LANGUAGE_NONE;
-          unset($row[$field_name]['_language']);
+          $language = isset($row[$field_name]['language']) ? $row[$field_name]['language'] : LANGUAGE_NONE;
+          unset($row[$field_name]['language']);
           $field_values[$language][0] = $row[$field_name];
         }
         else {
           foreach ($row[$field_name] as $delta => $column_values) {
-            $language = isset($column_values['_language']) ? $column_values['_language'] : LANGUAGE_NONE;
-            unset($column_values['_language']);
+            $language = isset($column_values['language']) ? $column_values['language'] : LANGUAGE_NONE;
+            unset($column_values['language']);
             $field_values[$language][$delta] = $column_values;
           }
         }
@@ -173,11 +176,11 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
 
   // Prepare the document.
   $new_entity = new stdClass();
-  $new_entity->_entity_id = intval($entity_id);
-  $new_entity->_entity_type = $entity_type;
-  $new_entity->_entity_bundle = $bundle;
+  $new_entity->entity_id = intval($entity_id);
+  $new_entity->entity_type = $entity_type;
+  $new_entity->entity_bundle = $bundle;
   if (isset($revision_id)) {
-    $new_entity->_revision_id = intval($revision_id);
+    $new_entity->revision_id = intval($revision_id);
   }
 
   // Add the base table's fields to the new object.
@@ -208,7 +211,7 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
                 $field_values[$column_name] = _elasticsearch_field_storage_value($field['columns'][$column_name]['type'], $column_value);
               }
               if ($language != LANGUAGE_NONE) {
-                $field_values['_language'] = $language;
+                $field_values['language'] = $language;
               }
             }
           }
@@ -228,7 +231,7 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
               }
               // Collapse the field structure.
               if ($language != LANGUAGE_NONE) {
-                $store_values['_language'] = $language;
+                $store_values['language'] = $language;
               }
               $field_values[] = $store_values;
             }
@@ -242,14 +245,14 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
   // Save the object.
   $index = elasticsearch_field_storage_index(FIELD_LOAD_CURRENT);
   $type = $index->getType($entity_type);
-  $document = new Elastica_Document($new_entity->_entity_id, (array) $new_entity);
+  $document = new Document($new_entity->entity_id, (array) $new_entity);
   $type->addDocument($document);
   $index->refresh();
 
   if (isset($revision_id)) {
     $index = elasticsearch_field_storage_index(FIELD_LOAD_REVISION);
     $type = $index->getType($entity_type);
-    $document = new Elastica_Document($new_entity->_revision_id, (array) $new_entity);
+    $document = new Document($new_entity->revision_id, (array) $new_entity);
     $type->addDocument($document);
     $index->refresh();
   }
@@ -281,8 +284,8 @@ function elasticsearch_field_storage_field_storage_delete($entity_type, $entity,
 
   // TODO: we need to make this scale. This is a dummy implementation for
   // test purposes.
-	$query = new Elastica_Query_Terms();
-	$query->setTerms('_entity_id', array($entity_id));
+	$query = new Terms();
+	$query->setTerms('entity_id', array($entity_id));
 
   $index = elasticsearch_field_storage_index(FIELD_LOAD_REVISION);
   $type = $index->getType($entity_type);
@@ -333,8 +336,8 @@ function elasticsearch_field_storage_field_attach_rename_bundle($entity_type, $b
   // TODO: we need to make this scale. This is a dummy implementation for
   // test purposes.
 
-	$query = new Elastica_Query_Terms();
-	$query->setTerms('_entity_bundle', array($bundle_old));
+	$query = new Terms();
+	$query->setTerms('entity_bundle', array($bundle_old));
 
   $indexes = array(
     elasticsearch_field_storage_index(FIELD_LOAD_CURRENT),
@@ -346,8 +349,8 @@ function elasticsearch_field_storage_field_attach_rename_bundle($entity_type, $b
     $result = $type->search($query);
     foreach ($result as $document) {
       $source = $document->getSource();
-      $source['_entity_bundle'] = $bundle_new;
-      $document = new Elastica_Document($document->getId(), $source);
+      $source['entity_bundle'] = $bundle_new;
+      $document = new Document($document->getId(), $source);
       $type->addDocument($document);
     }
     $index->refresh();
