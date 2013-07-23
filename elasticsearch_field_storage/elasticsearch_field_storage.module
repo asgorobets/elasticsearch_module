@@ -18,6 +18,7 @@ use Elastica\Filter\BoolNot;
 use Elastica\Filter\BoolAnd;
 use Elastica\Filter\Range;
 use Elastica\Filter\Nested;
+use Elastica\Filter\Exists;
 use Elastica\Exception\ResponseException;
 /**
  * Implement hook_field_storage_info().
@@ -296,7 +297,7 @@ function _elasticsearch_field_storage_query_build($field, $value, $operator, $ty
     case '>='     : return new Range($field, array('gte' => $value));
     case '!='     :
     case '<>'     : return new BoolNot(new Term(array($field => $value)));
-//    case 'STARTS_WITH' : return new MongoRegex('/^' . $value . '/');
+//    case 'STARTS_WITH' : return new Elastica\Filter\Prefix($field, $value);
 //    case 'CONTAINS'    : return new MongoRegex('/' . $value . '/i');
     case 'BETWEEN'     : return new Range($field, array('gte' => $value[0], 'lte' => $value[1]));
     default : throw new EntityFieldQueryException("$operator not implemented");
@@ -354,7 +355,7 @@ function elasticsearch_field_storage_field_storage_delete_instance($instance) {
  * Implements hook_entity_query_alter().
  */
 function elasticsearch_field_storage_entity_query_alter($query) {
-  //$query->executeCallback = 'elasticsearch_field_storage_query';
+  $query->executeCallback = 'elasticsearch_field_storage_query';
 }
 
 function elasticsearch_field_storage_query($query) {
@@ -366,7 +367,7 @@ function elasticsearch_field_storage_query($query) {
     unset($query->entityConditions['entity_type']);
   }
   // TODO: Implement this later.
-  /*else {
+  else {
     // It looks like we are performing a 'has_data' query as we aren't being
     // passed any entity conditions - we try to be sure of this by rebuilding
     // a has data query and comparing that to our query
@@ -388,11 +389,12 @@ function elasticsearch_field_storage_query($query) {
       }
       $field_has_data_query
         ->fieldCondition($field, $column, $values)
-        ->range(0, 1);
+        ->range(0, 1)
+        ->addTag('DANGEROUS_ACCESS_CHECK_OPT_OUT');
       if ($count) {
         $field_has_data_query->count();
       }
-      $field_has_data_query->executeCallback = 'mongodb_field_storage_query';
+      $field_has_data_query->executeCallback = 'elasticsearch_field_storage_query';
       $success = TRUE;
       foreach (get_object_vars($field_has_data_query) as $key => $value) {
         // We rebuild the has_data query and then compare with the received
@@ -403,24 +405,23 @@ function elasticsearch_field_storage_query($query) {
         }
       }
       if ($success) {
-        if (!is_array($field['bundles'])) {
-          // This field not yet attached to any bundles.
-          return FALSE;
-        }
-        if (is_array($field['bundles'])) {
-          foreach ($field['bundles'] as $entity_type => $data) {
-            foreach($data as $bundle_name) {
-              if (mongodb_collection('fields_current', $entity_type)->find(array($field['field_name'] => array('$exists' => TRUE), 'type' => $bundle_name))->limit(1)->count(TRUE)) {
-                return TRUE;
-              }
-            }
-          }
+        $index = elasticsearch_field_storage_index(FIELD_LOAD_CURRENT);
+        if ($index->count(new ConstantScore(new Exists($field['field_name'])))) {
+          return TRUE;
         }
         return FALSE;
       }
+
+      // If we're in a field_purge_batch query let's just skip for now.
+      // TODO: implement purging.
+      if ($query->deleted == TRUE) {
+        // Return nothing. Nothing has to be purged right now.
+        return array();
+      }
     }
-    // throw new EntityFieldQueryException('No entity_type');
-  }*/
+    //TODO: Figure out if an exception is needed here.
+    throw new EntityFieldQueryException('No entity_type');
+  }
 
   $type_map = array('entity_id' => 'int', 'revision_id' => 'int', 'bundle' => 'text');
   foreach ($query->entityConditions as $field => $data) {
