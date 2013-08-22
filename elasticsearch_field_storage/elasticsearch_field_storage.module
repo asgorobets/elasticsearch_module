@@ -4,22 +4,7 @@
  * @file
  * Implementation of the field storage API for Elasticsearch.
  */
-use Elastica\Client;
-use Elastica\Document;
-use Elastica\Query;
-use Elastica\Query\Ids;
-use Elastica\Query\Terms;
-use Elastica\Query\MatchAll;
-use Elastica\Query\Filtered;
-use Elastica\Query\ConstantScore;
-use Elastica\Filter\Type;
-use Elastica\Filter\Term;
-use Elastica\Filter\BoolNot;
-use Elastica\Filter\BoolAnd;
-use Elastica\Filter\Range;
-use Elastica\Filter\Nested;
-use Elastica\Filter\Exists;
-use Elastica\Exception\ResponseException;
+
 /**
  * Implement hook_field_storage_info().
  */
@@ -32,11 +17,17 @@ function elasticsearch_field_storage_field_storage_info() {
   );
 }
 
+/**
+ * Retrieve elasticsearch index by field age.
+ *
+ * @param $age
+ * @return \Elastica\Index
+ */
 function elasticsearch_field_storage_index($age) {
   if (!class_exists('Client')) {
     elasticsearch_init();
   }
-  $client = new Client();
+  $client = new Elastica\Client();
   return $client->getIndex(variable_get('elasticsearch_field_storage_prefix') . ($age == FIELD_LOAD_CURRENT ? 'field_current' : 'field_revision'));
 }
 
@@ -50,9 +41,12 @@ function elasticsearch_field_storage_create_indexes() {
     try {
       $index->getStatus();
     }
-    catch (ResponseException $e) {
-      // Try to create the index.
-      $index->create();
+    catch (Elastica\Exception\ResponseException $e) {
+      // Define default index settings.
+      $data = array();
+      // Allow modules to define their own index settings.
+      drupal_alter('elasticsearch_field_storage_index_settings',$data, $index);
+      $index->create($data);
     }
 
     // Set the mapping for each entity type.
@@ -60,22 +54,31 @@ function elasticsearch_field_storage_create_indexes() {
     foreach ($instances as $entity_type => $bundles) {
       $type = $index->getType($entity_type);
 
-    	$mapping = array(
+      $mapping = array(
         // Base information.
         'id' => array('type' => 'long', 'store' => 'yes'),
         'revision_id' => array('type' => 'long', 'store' => 'yes'),
         // Basic entity parameters.
         'entity_type' => array('type' => 'string', 'store' => 'yes'),
-        'entity_bundle' => array('type' => 'string', 'store' => 'yes'),
+        'bundle' => array('type' => 'string', 'store' => 'yes'),
       );
 
       // Add fields.
       foreach ($bundles as $bundle_name => $field_instances) {
         foreach ($field_instances as $field_name => $field_instance) {
-          $mapping[$field_name] = array('type' => 'nested');
+          $field = field_info_field($field_name);
+          // Create mappings only for elasticsearch field storage fields.
+          if ($field['storage']['type'] == 'elasticsearch_field_storage') {
+            $mapping[$field_name] = array('type' => 'nested');
+            $mapping[$field_name]['properties'] = array();
+            foreach ($field['columns'] as $column_name => $column) {
+              $properties = _elasticsearch_field_storage_field_properties($column_name, $column['type']);
+              $mapping[$field_name]['properties'] += $properties;
+            }
+          }
         }
       }
-    	$type->setMapping($mapping);
+      $type->setMapping($mapping);
     }
   }
 }
@@ -133,10 +136,12 @@ function elasticsearch_field_storage_field_storage_load($entity_type, $entities,
 
   // Execute the query and save the fields to the parent object.
   $type = elasticsearch_field_storage_index($age)->getType($entity_type);
-  $query = new Ids();
+  $query = new Elastica\Query\Ids();
   $query->setType($entity_type);
 	$query->setIds(array_keys($keys));
-	$result = $type->search($query);
+    // Size should be set or default size will be applied.
+    $size = count($keys);
+	$result = $type->search($query, $size);
 
   foreach ($result as $document) {
     $row = $document->getSource();
@@ -189,7 +194,7 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
   $new_entity = new stdClass();
   $new_entity->entity_id = intval($entity_id);
   $new_entity->entity_type = $entity_type;
-  $new_entity->entity_bundle = $bundle;
+  $new_entity->bundle = $bundle;
   if (isset($revision_id)) {
     $new_entity->revision_id = intval($revision_id);
   }
@@ -220,6 +225,9 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
             foreach ($values[0] as $column_name => $column_value) {
               if (isset($field['columns'][$column_name])) {
                 $field_values[$column_name] = _elasticsearch_field_storage_value($field['columns'][$column_name]['type'], $column_value);
+                if ($field['columns'][$column_name]['type'] == 'varchar') {
+                  $field_values[$column_name . '_startwith'] = _elasticsearch_field_storage_value($field['columns'][$column_name]['type'], $column_value);
+                }
               }
               if ($language != LANGUAGE_NONE) {
                 $field_values['language'] = $language;
@@ -238,6 +246,9 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
               foreach ($column_values as $column_name => $column_value) {
                 if (isset($field['columns'][$column_name])) {
                   $store_values[$column_name] = _elasticsearch_field_storage_value($field['columns'][$column_name]['type'], $column_values[$column_name]);
+                  if ($field['columns'][$column_name]['type'] == 'varchar') {
+                    $store_values[$column_name . '_startwith'] = _elasticsearch_field_storage_value($field['columns'][$column_name]['type'], $column_values[$column_name]);
+                  }
                 }
               }
               // Collapse the field structure.
@@ -256,14 +267,14 @@ function elasticsearch_field_storage_field_storage_write($entity_type, $entity, 
   // Save the object.
   $index = elasticsearch_field_storage_index(FIELD_LOAD_CURRENT);
   $type = $index->getType($entity_type);
-  $document = new Document($new_entity->entity_id, (array) $new_entity);
+  $document = new Elastica\Document($new_entity->entity_id, (array) $new_entity);
   $type->addDocument($document);
   $index->refresh();
 
   if (isset($revision_id)) {
     $index = elasticsearch_field_storage_index(FIELD_LOAD_REVISION);
     $type = $index->getType($entity_type);
-    $document = new Document($new_entity->revision_id, (array) $new_entity);
+    $document = new Elastica\Document($new_entity->revision_id, (array) $new_entity);
     $type->addDocument($document);
     $index->refresh();
   }
@@ -287,20 +298,81 @@ function _elasticsearch_field_storage_query_build($field, $value, $operator, $ty
   }
   $value = _elasticsearch_field_storage_value($type, $value);
   switch ($operator) {
-    case '='      : return new Term(array($field => $value));
+    case '='      : return new Elastica\Filter\Term(array($field => $value));
     case 'IN'     : return new Elastica\Filter\Terms($field, $value);
-    case 'NOT IN' : return new BoolNot(new Elastica\Filter\Terms($field, $value));
+    case 'NOT IN' : return new Elastica\Filter\BoolNot(new Elastica\Filter\Terms($field, $value));
     //case 'ALL'         : return array('$all' => $value);
-    case '<'      : return new Range($field, array('lt' => $value));
-    case '>'      : return new Range($field, array('gt' => $value));
-    case '<='     : return new Range($field, array('lte' => $value));
-    case '>='     : return new Range($field, array('gte' => $value));
+    case '<'      : return new Elastica\Filter\Range($field, array('lt' => $value));
+    case '>'      : return new Elastica\Filter\Range($field, array('gt' => $value));
+    case '<='     : return new Elastica\Filter\Range($field, array('lte' => $value));
+    case '>='     : return new Elastica\Filter\Range($field, array('gte' => $value));
     case '!='     :
-    case '<>'     : return new BoolNot(new Term(array($field => $value)));
-//    case 'STARTS_WITH' : return new Elastica\Filter\Prefix($field, $value);
-//    case 'CONTAINS'    : return new MongoRegex('/' . $value . '/i');
-    case 'BETWEEN'     : return new Range($field, array('gte' => $value[0], 'lte' => $value[1]));
+    case '<>'     : return new Elastica\Filter\BoolNot(new Elastica\Filter\Term(array($field => $value)));
+    case 'STARTS_WITH' :
+      $query = new Elastica\Query\Match();
+      $query->setFieldQuery($field . '_startwith', $value);
+      $query->setFieldType($field . '_startwith', 'phrase_prefix');
+      $filtered_query = new Elastica\Filter\Query($query);
+      return $filtered_query;
+    case 'CONTAINS'    :
+      $query = new Elastica\Query\Match();
+      $query->setField($field, $value);
+      $filtered_query = new Elastica\Filter\Query($query);
+      return $filtered_query;
+    case 'BETWEEN'     : return new Elastica\Filter\Range($field, array('gte' => $value[0], 'lte' => $value[1]));
     default : throw new EntityFieldQueryException("$operator not implemented");
+  }
+}
+
+function _elasticsearch_field_storage_field_properties($column_name, $type) {
+  switch ($type) {
+    case 'varchar':
+      return array(
+        $column_name => _elasticsearch_field_storage_field_mapping($type),
+        // TODO: Convert to multi_field if reasonable.
+        $column_name . '_startwith' => _elasticsearch_field_storage_field_mapping('startwith_string'),
+      );
+      break;
+    default:
+      return array($column_name => _elasticsearch_field_storage_field_mapping($type));
+      break;
+  }
+}
+
+function _elasticsearch_field_storage_field_mapping($type) {
+  switch ($type) {
+    case 'text':
+    case 'varchar':
+      return array(
+        'type' => 'string',
+      );
+    case 'startwith_string':
+      return array(
+        'type' => 'string',
+        "search_analyzer" => "analyzer_startswith",
+        "index_analyzer" => "analyzer_startswith",
+      );
+    case 'int':
+      return array(
+        'type' => 'integer',
+      );
+    case 'boolean':
+      return array(
+        'type' => 'boolean',
+      );
+    case 'float':
+      return array(
+        'type' => 'float',
+      );
+
+    case 'date':
+      return array(
+        'type' => 'date',
+        'format' => 'date_time',
+      );
+
+    default:
+      return NULL;
   }
 }
 
@@ -318,7 +390,7 @@ function elasticsearch_field_storage_field_storage_delete($entity_type, $entity,
 
   // TODO: we need to make this scale. This is a dummy implementation for
   // test purposes.
-	$query = new Terms();
+	$query = new Elastica\Query\Terms();
 	$query->setTerms('entity_id', array($entity_id));
 
   $index = elasticsearch_field_storage_index(FIELD_LOAD_REVISION);
@@ -355,15 +427,18 @@ function elasticsearch_field_storage_field_storage_delete_instance($instance) {
  * Implements hook_entity_query_alter().
  */
 function elasticsearch_field_storage_entity_query_alter($query) {
-  $query->executeCallback = 'elasticsearch_field_storage_query';
+  // TODO: Figure out a way to implement this smarter and avoid conflicts.
+  if (isset($query->entityConditions['entity_type']['value']) && $query->entityConditions['entity_type']['value'] == 'node') {
+    $query->executeCallback = 'elasticsearch_field_storage_query';
+  }
 }
 
 function elasticsearch_field_storage_query($query) {
   // Use AND filter type as wrapper for all filters.
-  $filter = new BoolAnd();
+  $filter = new Elastica\Filter\BoolAnd();
   if (isset($query->entityConditions['entity_type'])) {
     $entity_type = $query->entityConditions['entity_type']['value'];
-    $filter->addFilter(new Type($entity_type));
+    $filter->addFilter(new Elastica\Filter\Type($entity_type));
     unset($query->entityConditions['entity_type']);
   }
   // TODO: Implement this later.
@@ -406,7 +481,7 @@ function elasticsearch_field_storage_query($query) {
       }
       if ($success) {
         $index = elasticsearch_field_storage_index(FIELD_LOAD_CURRENT);
-        if ($index->count(new ConstantScore(new Exists($field['field_name'])))) {
+        if ($index->count(new Elastica\Query\ConstantScore(new Elastica\Filter\Exists($field['field_name'])))) {
           return TRUE;
         }
         return FALSE;
@@ -451,10 +526,14 @@ function elasticsearch_field_storage_query($query) {
 //      }
 //    }
 //    else {
-    $nested_filter = new Nested();
+    $nested_filter = new Elastica\Filter\Nested();
     $nested_filter->setPath($fieldName);
     $field_value_filter = _elasticsearch_field_storage_query_build($fieldName . '.' . $data['column'], $data['value'], $data['operator'], $type);
-    $nested_filter->setQuery(new ConstantScore($field_value_filter));
+    // Convert filter to query in order to use with Nested filter.
+    if ($field_value_filter instanceof \Elastica\Filter\AbstractFilter) {
+      $field_value_filter = new Elastica\Query\ConstantScore($field_value_filter);
+    }
+    $nested_filter->setQuery($field_value_filter);
     $filter->addFilter($nested_filter);
 //    }
     unset($query->fields[$index]);
@@ -470,7 +549,8 @@ function elasticsearch_field_storage_query($query) {
   $id_key = $query->age == FIELD_LOAD_CURRENT ? 'entity_id' : 'revision_id';
 
   // Wrap our filter in ConstantScore query.
-  $filtered_query = new ConstantScore($filter);
+  $filtered_query = new Elastica\Query();
+  $filtered_query = $filtered_query->create($filter);
   $search_options = array();
   $index = elasticsearch_field_storage_index($query->age);
   $type = $index->getType($entity_type);
@@ -486,8 +566,7 @@ function elasticsearch_field_storage_query($query) {
       return $type->search($filtered_query, $search_options)->count();
     }
     else {
-      // TODO: Implement sorting.
-      /*
+      // TODO: Create not_analyzed fields to sort text fields.
       $sort = array();
       foreach ($query->order as $order) {
         switch ($order['type']) {
@@ -498,16 +577,14 @@ function elasticsearch_field_storage_query($query) {
             $key = $order['specifier'];
             break;
           case 'entity':
-            $key = $entity_map[$order['specifier']];
+            $key = $order['specifier'];
             break;
         }
-        $sort[$key] = $order['direction'] == 'ASC' ? 1 : -1;
+        $sort[$key]['order'] = $order['direction'] == 'ASC' ? 'asc' : 'desc';
       }
       if ($sort) {
-        $cursor->sort($sort);
+        $filtered_query->setParam('sort', $sort);
       }
-       *
-       */
     }
   }
 
@@ -515,7 +592,7 @@ function elasticsearch_field_storage_query($query) {
   $return = array();
   foreach ($results as $result) {
     $result = $result->getSource();
-    $entity = entity_create_stub_entity($entity_type, array($result['entity_id'], $result['revision_id'], $result['entity_bundle']));
+    $entity = entity_create_stub_entity($entity_type, array($result['entity_id'], $result['revision_id'], $result['bundle']));
     $return[$entity_type][$result[$id_key]] = $entity;
   }
 
@@ -529,8 +606,8 @@ function elasticsearch_field_storage_field_attach_rename_bundle($entity_type, $b
   // TODO: we need to make this scale. This is a dummy implementation for
   // test purposes.
 
-	$query = new Terms();
-	$query->setTerms('entity_bundle', array($bundle_old));
+	$query = new Elastica\Query\Terms();
+	$query->setTerms('bundle', array($bundle_old));
 
   $indexes = array(
     elasticsearch_field_storage_index(FIELD_LOAD_CURRENT),
@@ -542,8 +619,8 @@ function elasticsearch_field_storage_field_attach_rename_bundle($entity_type, $b
     $result = $type->search($query);
     foreach ($result as $document) {
       $source = $document->getSource();
-      $source['entity_bundle'] = $bundle_new;
-      $document = new Document($document->getId(), $source);
+      $source['bundle'] = $bundle_new;
+      $document = new Elastica\Document($document->getId(), $source);
       $type->addDocument($document);
     }
     $index->refresh();
@@ -570,4 +647,18 @@ function elasticsearch_field_storage_entity_update($entity, $entity_type) {
 function _DISABLED_elasticsearch_field_storage_field_attach_delete($entity_type, $entity) {
   // Disabled: this needs to be rewritten as a hook_entity_delete(),
   // and as a consequence this module needs to depend on Entity API.
+}
+
+/**
+ * Implements hook__elasticsearch_field_storage_index_settings_alter().
+ *
+ * @param \Elastica\Index $index
+ * @param $data
+ */
+function elasticsearch_field_storage_elasticsearch_field_storage_index_settings_alter(&$data, Elastica\Index $index) {
+  // Define default settings and analysers.
+  $data['settings']['index']['analysis']['analyzer']['analyzer_startswith'] = array(
+    "tokenizer" => "keyword",
+    "filter" => "lowercase",
+  );
 }
