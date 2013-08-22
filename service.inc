@@ -48,7 +48,7 @@ class ElasticsearchService extends SearchApiAbstractService {
 
   public function deleteItems($ids = 'all', SearchApiIndex $index = NULL) {
     if ($ids == 'all' && $index) {
-      $client = new Client();
+      $client = new Client(/*$this->options*/);
       $index = $client->getIndex($index->machine_name);
       $index->delete();
     }
@@ -126,7 +126,7 @@ class ElasticsearchService extends SearchApiAbstractService {
   }
 
   public function getIndexType($index) {
-    $client = new Client();
+    $client = new Client(/*$this->options*/);
     $index = $client->getIndex($index->machine_name);
     return $index->getType('entity');
   }
